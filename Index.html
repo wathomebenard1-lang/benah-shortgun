@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Shotgun High/Low Tick Engine</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #0f172a; color: #f8fafc; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 20px; }
+    .card { background: #1e293b; width: 100%; max-width: 520px; border-radius: 12px; padding: 24px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); border: 1px solid #334155; }
+    h2 { font-size: 1.4rem; font-weight: 700; margin-bottom: 20px; color: #38bdf8; text-align: center; border-bottom: 1px solid #334155; padding-bottom: 12px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+    .form-group { margin-bottom: 16px; }
+    label { display: block; font-size: 0.85rem; font-weight: 600; color: #94a3b8; margin-bottom: 6px; }
+    input, select { width: 100%; padding: 10px 12px; background: #0f172a; border: 1px solid #334155; border-radius: 6px; color: #f8fafc; font-size: 0.95rem; outline: none; }
+    .status-badge { display: flex; justify-content: space-between; align-items: center; background: #0f172a; padding: 12px; border-radius: 6px; font-size: 0.85rem; margin-bottom: 20px; border: 1px solid #334155; }
+    .status-val { font-weight: 700; color: #ef4444; }
+    .balance-val { font-weight: 700; color: #38bdf8; }
+    button { width: 100%; padding: 14px; background: #22c55e; color: #ffffff; border: none; border-radius: 6px; font-size: 1rem; font-weight: 700; cursor: pointer; transition: background 0.2s; }
+    button:hover { background: #16a34a; }
+    button.stop { background: #ef4444; }
+    .console-header { margin-top: 20px; font-size: 0.8rem; font-weight: 600; color: #64748b; text-transform: uppercase; margin-bottom: 6px; }
+    #log { background: #020617; border: 1px solid #1e293b; border-radius: 6px; padding: 12px; font-family: monospace; font-size: 0.8rem; height: 180px; overflow-y: auto; color: #22c55e; line-height: 1.4; }
+  </style>
+</head>
+<body>
+
+<div class="card">
+  <h2>Shotgun High/Low Tick Engine</h2>
+
+  <div class="status-badge">
+    <span>Status: <span id="status" class="status-val">DISCONNECTED</span></span>
+    <span>Account: <span id="account" class="balance-val">CR00170671</span></span>
+  </div>
+
+  <div class="form-group">
+    <label>Trading Symbol</label>
+    <select id="symbol">
+      <option value="1HZ100V" selected>Volatility 100 (1s) Index</option>
+      <option value="1HZ75V">Volatility 75 (1s) Index</option>
+    </select>
+  </div>
+
+  <div class="grid">
+    <div class="form-group">
+      <label>Stake ($)</label>
+      <input type="number" id="stake" value="2" min="1" step="0.5">
+    </div>
+    <div class="form-group">
+      <label>Target Tick</label>
+      <select id="selectedTick">
+        <option value="5" selected>Tick 5 (Default)</option>
+        <option value="1">Tick 1</option>
+        <option value="2">Tick 2</option>
+        <option value="3">Tick 3</option>
+        <option value="4">Tick 4</option>
+      </select>
+    </div>
+  </div>
+
+  <button id="actionBtn" onclick="toggleExecution()">START SHOTGUN HEDGE</button>
+
+  <div class="console-header">Execution Console Logs</div>
+  <div id="log">> Engine ready for account CR00170671...</div>
+</div>
+
+<script>
+const CONFIG = {
+  account_id: 'CR00170671',
+  app_id: '34zGNHRGMn8nXgCBGoKRr',
+  token: 'pat_2c18b884d1f4ee31e7ba6e5ddd259245cda213f508d52c249a9a72a3c570c2cd'
+};
+
+let ws = null;
+let isExecuting = false;
+
+function printLog(msg) {
+  const logDiv = document.getElementById('log');
+  const now = new Date();
+  const timestamp = now.toTimeString().split(' ')[0] + '.' + String(now.getMilliseconds()).padStart(3, '0');
+  logDiv.innerHTML += `<br>[${timestamp}] ${msg}`;
+  logDiv.scrollTop = logDiv.scrollHeight;
+}
+
+function updateStatus(statusText, isConnected) {
+  const statusEl = document.getElementById('status');
+  statusEl.innerText = statusText;
+  statusEl.style.color = isConnected ? '#22c55e' : '#ef4444';
+}
+
+function toggleExecution() {
+  if (isExecuting) stopEngine();
+  else startEngine();
+}
+
+async function startEngine() {
+  isExecuting = true;
+  const btn = document.getElementById('actionBtn');
+  btn.innerText = 'STOP ENGINE';
+  btn.classList.add('stop');
+
+  printLog(`Requesting OTP for account ${CONFIG.account_id}...`);
+
+  try {
+    const response = await fetch(`https://api.derivws.com/trading/v1/options/accounts/${CONFIG.account_id}/otp`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${CONFIG.token}`,
+        'Deriv-App-ID': CONFIG.app_id,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    const data = await response.json();
+
+    if (!response.ok || !data.data || !data.data.url) {
+      printLog(`OTP AUTH ERROR: ${data.message || 'Failed to retrieve OTP URL'}`);
+      stopEngine();
+      return;
+    }
+
+    const wsUrl = data.data.url;
+    printLog('OTP URL acquired. Connecting to WebSocket gateway...');
+
+    ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+      updateStatus('CONNECTED', true);
+      printLog('WebSocket connected and authorized! Executing hedge...');
+      dispatchShotgunHedge();
+    };
+
+    ws.onmessage = (evt) => {
+      const msg = JSON.parse(evt.data);
+
+      if (msg.msg_type === 'proposal') {
+        if (msg.error) {
+          printLog(`PROPOSAL ERROR: ${msg.error.message}`);
+          return;
+        }
+        printLog(`Proposal received (${msg.echo_req.contract_type}). Purchasing...`);
+        ws.send(JSON.stringify({ buy: msg.proposal.id, price: msg.proposal.ask_price }));
+      }
+
+      if (msg.msg_type === 'buy') {
+        if (msg.error) {
+          printLog(`BUY ERROR: ${msg.error.message}`);
+          return;
+        }
+        printLog(`ORDER CONFIRMED! Contract ID: ${msg.buy.contract_id} | Cost: $${msg.buy.buy_price}`);
+      }
+    };
+
+    ws.onerror = (err) => {
+      printLog('WebSocket Connection Refused.');
+      stopEngine();
+    };
+
+    ws.onclose = () => {
+      printLog('Socket connection closed.');
+      stopEngine();
+    };
+
+  } catch (err) {
+    printLog(`NETWORK ERROR: ${err.message}`);
+    stopEngine();
+  }
+}
+
+function stopEngine() {
+  isExecuting = false;
+  if (ws) ws.close();
+  updateStatus('DISCONNECTED', false);
+  const btn = document.getElementById('actionBtn');
+  btn.innerText = 'START SHOTGUN HEDGE';
+  btn.classList.remove('stop');
+}
+
+function dispatchShotgunHedge() {
+  const symbol = document.getElementById('symbol').value;
+  const stake = parseFloat(document.getElementById('stake').value);
+  const selectedTick = parseInt(document.getElementById('selectedTick').value);
+
+  printLog(`FIRING TICKHIGH & TICKLOW orders on ${symbol} ($${stake} stake)...`);
+
+  ws.send(JSON.stringify({
+    proposal: 1, amount: stake, basis: 'stake', contract_type: 'TICKHIGH', currency: 'USD', duration: 5, duration_unit: 't', selected_tick: selectedTick, symbol: symbol
+  }));
+
+  ws.send(JSON.stringify({
+    proposal: 1, amount: stake, basis: 'stake', contract_type: 'TICKLOW', currency: 'USD', duration: 5, duration_unit: 't', selected_tick: selectedTick, symbol: symbol
+  }));
+}
+</script>
+</body>
+</html>
